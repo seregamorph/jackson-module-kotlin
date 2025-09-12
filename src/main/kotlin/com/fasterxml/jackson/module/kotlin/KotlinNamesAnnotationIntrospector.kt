@@ -1,6 +1,7 @@
 package com.fasterxml.jackson.module.kotlin
 
 import com.fasterxml.jackson.annotation.JsonCreator
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.PropertyName
 import com.fasterxml.jackson.databind.cfg.MapperConfig
@@ -12,6 +13,8 @@ import com.fasterxml.jackson.databind.introspect.AnnotatedMethod
 import com.fasterxml.jackson.databind.introspect.AnnotatedParameter
 import com.fasterxml.jackson.databind.introspect.NopAnnotationIntrospector
 import com.fasterxml.jackson.databind.util.BeanUtil
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 import java.util.Locale
@@ -28,17 +31,49 @@ import kotlin.reflect.jvm.javaType
 import kotlin.reflect.jvm.kotlinFunction
 
 internal class KotlinNamesAnnotationIntrospector(val module: KotlinModule, val cache: ReflectionCache, val ignoredClassesForImplyingJsonCreator: Set<KClass<*>>) : NopAnnotationIntrospector() {
+
+    private companion object {
+        private val logger: Logger = LoggerFactory.getLogger(KotlinNamesAnnotationIntrospector::class.java)
+    }
+
     // since 2.4
-    override fun findImplicitPropertyName(member: AnnotatedMember): String? = when (member) {
-        is AnnotatedMethod -> if (member.name.contains('-') && member.parameterCount == 0) {
-            when {
-                member.name.startsWith("get") -> member.name.substringAfter("get")
-                member.name.startsWith("is") -> member.name.substringAfter("is")
-                else -> null
-            }?.replaceFirstChar { it.lowercase(Locale.getDefault()) }?.substringBefore('-')
-        } else null
-        is AnnotatedParameter -> findKotlinParameterName(member)
-        else -> null
+    override fun findImplicitPropertyName(member: AnnotatedMember): String? {
+        if (member.declaringClass.isKotlinClass()
+            && !(
+                    member.declaringClass.getName().startsWith("kotlin.")
+                            || member.declaringClass.getName().startsWith("kotlinx.")
+            )
+            && member is AnnotatedMethod
+            && member.name.startsWith("is")
+            && member.parameterCount == 0
+        ) {
+            val isProperty = member.declaringClass.kotlin.memberProperties
+                .any { it.name == member.name }
+            if (!isProperty
+                && member.getAnnotation(JsonProperty::class.java) == null
+                && member.getAnnotation(JsonIgnore::class.java) == null
+            ) {
+                // See https://github.com/FasterXML/jackson-module-kotlin/issues/670
+                // isMethod is not a property, hence its serialization behaviour may be affected
+                // by jackson-kotlin update unless it's explicitly annotated with JsonProperty
+                val ex = IllegalStateException("$member is an is-Method() not explicitly annotated with "
+                        + "@JsonProperty. Please use @JsonProperty to avoid possible changed serialization "
+                        + "behavior on Jackson Kotlin Module update")
+                logger.error("Error", ex)
+                throw ex
+            }
+        }
+        return when (member) {
+            is AnnotatedMethod -> if (member.name.contains('-') && member.parameterCount == 0) {
+                when {
+                    member.name.startsWith("get") -> member.name.substringAfter("get")
+                    member.name.startsWith("is") -> member.name.substringAfter("is")
+                    else -> null
+                }?.replaceFirstChar { it.lowercase(Locale.getDefault()) }?.substringBefore('-')
+            } else null
+            is AnnotatedParameter -> findKotlinParameterName(member)
+            else -> null
+        }
     }
 
     // since 2.11: support Kotlin's way of handling "isXxx" backed properties where
